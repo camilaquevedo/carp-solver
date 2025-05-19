@@ -159,7 +159,7 @@ def improve(routes, inst):
     return [(two_opt_route(tour, inst.dist), load) for tour, load in routes]
 
 # ----------------------------------------
-# ESCRITURA DE LA SOLUCIÓN
+# ESCRITURA DE LA SOLUCIÓN (solo GAP vs. UB)
 # ----------------------------------------
 def write_solution(inst, routes, sol_path, t_elapsed):
     cost_total = 0
@@ -174,22 +174,22 @@ def write_solution(inst, routes, sol_path, t_elapsed):
 
         stats = GDB_STATS.get(inst.name)
         if stats:
-            lb = stats['LB']
             ub = stats['UB']
-            gap_lb = (cost_total - lb) / lb * 100
             gap_ub = (cost_total - ub) / ub * 100
-            f.write(f"LB (Benavent): {lb}\n")
             f.write(f"BKS (UB):       {ub}\n")
-            f.write(f"GAP vs. LB:     {gap_lb:.2f}%\n")
             f.write(f"GAP vs. UB:     {gap_ub:.2f}%\n")
         else:
-            f.write("LB/BKS: N/D\nGAP: N/A\n")
+            f.write("BKS (UB):       N/D\n")
+            f.write("GAP vs. UB:     N/A\n")
 
         f.write(f"Tiempo de ejecución: {t_elapsed:.3f} s\n")
 
-    print(f"Resuelto {inst.name}: coste={cost_total}, "
-          f"GAP_vs_LB={(gap_lb if stats else 0):.2f}%, "
-          f"tiempo={t_elapsed:.3f}s")
+    # Impresión por pantalla
+    if stats:
+        print(f"Resuelto {inst.name}: coste={cost_total}, GAP_vs_UB={gap_ub:.2f}%, tiempo={t_elapsed:.3f}s")
+    else:
+        print(f"Resuelto {inst.name}: coste={cost_total}, GAP_vs_UB=N/A, tiempo={t_elapsed:.3f}s")
+
 
 # ----------------------------------------
 # PUNTO DE ENTRADA
