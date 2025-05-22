@@ -1,9 +1,9 @@
 """
 Heurística constructiva en cuatro fases:
-  - Fase 1 (0–PHASE1_TIME): GRASP‐RCL + LS ligera + ejection‐chain
-  – Fase 2 (si GAP > 3%): Randomized Giant Tour + Split + intra‐2opt (0–PHASE2_TIME)
-  – Fase 3 (si GAP > 3%): VNS ligera sobre la mejor solución (0–PHASE3_TIME)
-  – Fase 4 (si GAP > 3%): Ejection‐Chain profunda (L=3) (0–PHASE4_TIME)
+  – Fase 1 (GRASP‐RCL + LS ligera + ejection‐chain L=1)
+  – Fase 2 (Random Giant Tour + Split + 2-opt)
+  – Fase 3 (VNS ligera)
+  – Fase 4 (Ejection‐Chain profunda L=3)
 """
 
 import math, re, sys, time, heapq, random
@@ -12,14 +12,14 @@ from copy import deepcopy
 
 # — Parámetros globales —————————————————————————
 SEED         = 42
-PHASE1_TIME  = 60.0    # segundos de fase 1 (GRASP‐LS)
-PHASE2_TIME  = 60.0    # segundos de fase 2 (Giant‐Split)
-PHASE3_TIME  = 15.0    # segundos de fase 3 (VNS ligera)
-PHASE4_TIME  = 15.0    # segundos de fase 4 (Ejection-Chain profunda)
+PHASE1_TIME  = 60.0    # segundos de fase 1
+PHASE2_TIME  = 60.0    # segundos de fase 2
+PHASE3_TIME  = 15.0    # segundos de fase 3
+PHASE4_TIME  = 15.0    # segundos de fase 4
 ALPHA_RCL    = 0.15    # RCL para GRASP
-TOP_K        = 3       # candidatos RCL en Giant‐Split
+TOP_K        = 3       # candidatos en Giant-Split
 
-# BKS (óptimos)
+# Best Known Solutions (óptimos)
 BKS = {
     'gdb1':316,'gdb2':339,'gdb3':275,'gdb4':287,'gdb5':377,
     'gdb6':298,'gdb7':325,'gdb8':348,'gdb9':303,'gdb10':275,
@@ -80,8 +80,7 @@ def compute_cost(sol, inst):
 def trivial_solution(inst):
     return [([inst.depot,a.u,a.v,inst.depot], a.dem) for a in inst.req]
 
-
-# Fase 1: GRASP‐RCL + LS ligera + ejection‐chain ligera
+#   (1) GRASP‐RCL + LS ligera + ejection‐chain L=1
 
 def constructive_grasp(inst):
     unserved = set((a.u,a.v) for a in inst.req)
@@ -90,61 +89,60 @@ def constructive_grasp(inst):
         cur, load = inst.depot, 0
         tour = [inst.depot]
         while True:
-            C = []
+            C=[]
             for u,v in unserved:
-                d = inst.dem[(u,v)]
-                if load + d > inst.Q: continue
-                C.append((inst.dist[cur][u], u, v))
+                d=inst.dem[(u,v)]
+                if load+d>inst.Q: continue
+                C.append((inst.dist[cur][u],u,v))
             if not C: break
-            C.sort(key=lambda x: x[0])
-            dmin, dmax = C[0][0], C[-1][0]
-            thr = dmin + ALPHA_RCL * (dmax - dmin)
-            RCL = [(u,v) for dist,u,v in C if dist <= thr]
-            u,v = random.choice(RCL)
+            C.sort(key=lambda x:x[0])
+            dmin,dmax=C[0][0],C[-1][0]
+            thr = dmin + ALPHA_RCL*(dmax-dmin)
+            RCL=[(u,v) for dist,u,v in C if dist<=thr]
+            u,v=random.choice(RCL)
             tour.extend([u,v])
-            load += inst.dem[(u,v)]
+            load+=inst.dem[(u,v)]
             unserved.remove((u,v))
-            cur = v
+            cur=v
         tour.append(inst.depot)
         routes.append((tour, load))
     return routes
 
 def intra_two_opt(sol, inst):
     for i,(tour,load) in enumerate(sol):
-        best_t, delta = tour, 0
-        L = len(tour)
-        for a in range(1, L-2):
-            for b in range(a+1, L-1):
-                u1,v1 = tour[a-1], tour[a]
-                u2,v2 = tour[b],    tour[b+1]
-                old = inst.dist[u1][v1] + inst.dist[u2][v2]
-                new = inst.dist[u1][u2] + inst.dist[v1][v2]
-                d = new - old
-                if d < delta:
-                    delta = d
-                    best_t = tour[:a] + tour[a:b+1][::-1] + tour[b+1:]
-        if delta < 0:
-            sol[i] = (best_t, load)
+        best_t,delta=tour,0
+        L=len(tour)
+        for a in range(1,L-2):
+            for b in range(a+1,L-1):
+                u1,v1=tour[a-1],tour[a]
+                u2,v2=tour[b],tour[b+1]
+                old=inst.dist[u1][v1]+inst.dist[u2][v2]
+                new=inst.dist[u1][u2]+inst.dist[v1][v2]
+                d=new-old
+                if d<delta:
+                    delta, best_t = d, tour[:a]+tour[a:b+1][::-1]+tour[b+1:]
+        if delta<0:
+            sol[i]=(best_t, load)
     return sol
 
 def inter_relocate(sol, inst):
-    improved = True
+    improved=True
     while improved:
-        improved = False
-        base = compute_cost(sol, inst)
+        improved=False
+        base=compute_cost(sol,inst)
         for i,(ti,li) in enumerate(sol):
-            for pos in range(1, len(ti)-2):
-                u,v = ti[pos], ti[pos+1]
-                d = inst.dem.get((u,v),0)
+            for pos in range(1,len(ti)-2):
+                u,v=ti[pos],ti[pos+1]
+                d=inst.dem.get((u,v),0)
                 if d==0 or li-d<0: continue
                 for j,(tj,lj) in enumerate(sol):
                     if i==j or lj+d>inst.Q: continue
-                    nr = deepcopy(sol)
-                    nr[i] = (ti[:pos]+ti[pos+2:], li-d)
-                    nr[j] = (tj[:-1]+[u,v]+[tj[-1]], lj+d)
-                    c = compute_cost(nr, inst)
-                    if c < base:
-                        sol, base, improved = nr, c, True
+                    nr=deepcopy(sol)
+                    nr[i]=(ti[:pos]+ti[pos+2:],li-d)
+                    nr[j]=(tj[:-1]+[u,v]+[tj[-1]],lj+d)
+                    c=compute_cost(nr,inst)
+                    if c<base:
+                        sol,base,improved=nr,c,True
                         break
                 if improved: break
             if improved: break
@@ -157,85 +155,84 @@ def ejection_chain(sol, inst, L=1):
         sol = intra_two_opt(sol, inst)
         sol = inter_relocate(sol, inst)
         for i,(ti,li) in enumerate(sol):
-            poss = [p for p in range(1, len(ti)-1) if (ti[p], ti[p+1]) in inst.dem]
+            poss=[p for p in range(1,len(ti)-1) if (ti[p],ti[p+1]) in inst.dem]
             if not poss: continue
-            pos = random.choice(poss)
-            u,v = ti[pos], ti[pos+1]
-            d = inst.dem[(u,v)]
-            j = random.choice([x for x in range(len(sol)) if x!=i])
-            tj,lj = sol[j]
-            if lj + d <= inst.Q:
-                nr = deepcopy(sol)
-                nr[i] = (ti[:pos]+ti[pos+2:], li-d)
-                nr[j] = (tj[:-1]+[u,v]+[tj[-1]], lj+d)
-                c = compute_cost(nr, inst)
-                if c < best_c:
-                    best_sol, best_c = nr, c
-        sol = best_sol
+            pos=random.choice(poss)
+            u,v=ti[pos],ti[pos+1]
+            d=inst.dem[(u,v)]
+            j=random.choice([x for x in range(len(sol)) if x!=i])
+            tj,lj=sol[j]
+            if lj+d<=inst.Q:
+                nr=deepcopy(sol)
+                nr[i]=(ti[:pos]+ti[pos+2:],li-d)
+                nr[j]=(tj[:-1]+[u,v]+[tj[-1]],lj+d)
+                c=compute_cost(nr,inst)
+                if c<best_c:
+                    best_sol,best_c=nr,c
+        sol=best_sol
     return best_sol
 
 def constructive_with_ls(inst):
-    sol = constructive_grasp(inst)
-    sol = intra_two_opt(sol, inst)
-    sol = inter_relocate(sol, inst)
-    sol = ejection_chain(sol, inst, L=1)
+    sol=constructive_grasp(inst)
+    sol=intra_two_opt(sol,inst)
+    sol=inter_relocate(sol,inst)
+    sol=ejection_chain(sol,inst,L=1)
     return sol
 
-# Fase 2: Randomized Giant Tour + Split + intra‐2opt
+#   (2) Giant-Split (Randomized Giant + Split + 2-opt)
 
 def build_randomized_giant(inst):
-    un = set((a.u,a.v) for a in inst.req)
-    path = [inst.depot]; cur = inst.depot
+    un=set((a.u,a.v) for a in inst.req)
+    path=[inst.depot]; cur=inst.depot
     while un:
-        cand = [(inst.dist[cur][u],u,v) for u,v in un]
-        cand.sort(key=lambda x: x[0])
-        top = cand[:min(TOP_K, len(cand))]
-        _,u,v = random.choice(top)
+        cand=[(inst.dist[cur][u],u,v) for u,v in un]
+        cand.sort(key=lambda x:x[0])
+        top=cand[:min(TOP_K,len(cand))]
+        _,u,v=random.choice(top)
         path.extend([u,v])
-        cur = v; un.remove((u,v))
+        cur=v; un.remove((u,v))
     path.append(inst.depot)
     return path
 
-def split_giant(inst, path):
-    n = len(path)
-    pd, pc = [0]*n, [0]*n
+def split_giant(inst,path):
+    n=len(path)
+    pd=[0]*n; pc=[0]*n
     for i in range(1,n):
-        u,v = path[i-1], path[i]
-        pd[i] = pd[i-1] + inst.dem.get((u,v),0)
-        pc[i] = pc[i-1] + inst.cost.get((u,v), inst.dist[u][v])
-    dp   = [math.inf]*n
-    prev = [-1]*n
-    dp[0] = 0
+        u,v=path[i-1],path[i]
+        pd[i]=pd[i-1]+inst.dem.get((u,v),0)
+        pc[i]=pc[i-1]+inst.cost.get((u,v),inst.dist[u][v])
+    dp=[math.inf]*n; prev=[-1]*n
+    dp[0]=0
     for j in range(1,n):
         for i in range(j,-1,-1):
-            load = pd[j]-pd[i]
+            load=pd[j]-pd[i]
             if load>inst.Q: break
-            cost = dp[i]
-            cost += inst.dist[inst.depot][path[i]]
-            cost += (pc[j]-pc[i])
-            cost += inst.dist[path[j]][inst.depot]
-            if cost < dp[j]:
-                dp[j], prev[j] = cost, i
+            cost=dp[i]
+            cost+=inst.dist[inst.depot][path[i]]
+            cost+=pc[j]-pc[i]
+            cost+=inst.dist[path[j]][inst.depot]
+            if cost<dp[j]:
+                dp[j],prev[j]=cost,i
     sol=[]; j=n-1
     while j>0:
-        i = prev[j]
-        seg  = [inst.depot] + path[i+1:j+1] + [inst.depot]
-        load = pd[j]-pd[i]
-        sol.append((seg, load))
-        j = i
+        i=prev[j]
+        seg=[inst.depot]+path[i+1:j+1]+[inst.depot]
+        load=pd[j]-pd[i]
+        sol.append((seg,load))
+        j=i
     sol.reverse()
     return sol
 
 def build_split_sol(inst):
-    giant = build_randomized_giant(inst)
-    sol   = split_giant(inst, giant)
-    sol   = intra_two_opt(sol, inst)
+    giant=build_randomized_giant(inst)
+    sol=split_giant(inst,giant)
+    sol=intra_two_opt(sol,inst)
     return sol
 
-# Main: cuatro fases con early-stop
+#   Main: ensamblar las cuatro fases + sanitización
 
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv)!=3:
         print("Uso: python carp_four_phase_constructive.py <in.dat> <out.sol>")
         sys.exit(1)
     random.seed(SEED)
@@ -247,80 +244,93 @@ def main():
     iters  = 0
     start  = time.time()
 
-    # Fase 1
-    while time.time() - start < PHASE1_TIME:
+    # — Fase 1
+    while time.time()-start < PHASE1_TIME:
         sol = constructive_with_ls(inst)
         iters += 1
         c = compute_cost(sol, inst)
-        if c >= ub and c < best_c:
-            best, best_c = sol, c
-            if (best_c - ub)/ub*100 <= 3.0:
+        if c>=ub and c<best_c:
+            best,best_c = sol,c
+            if (best_c-ub)/ub*100 <= 3.0:
                 print("GAP ≤ 3% logrado en fase 1")
                 break
 
-    # Fase 2
-    if (best_c - ub)/ub*100 > 3.0:
-        phase2_start = time.time()
+    # — Fase 2
+    if (best_c-ub)/ub*100 > 3.0:
+        t2=time.time()
         print("Entrando en fase 2...")
-        while time.time() - phase2_start < PHASE2_TIME:
+        while time.time()-t2 < PHASE2_TIME:
             sol = build_split_sol(inst)
             iters += 1
             c = compute_cost(sol, inst)
-            if c >= ub and c < best_c:
-                best, best_c = sol, c
-                if (best_c - ub)/ub*100 <= 3.0:
+            if c>=ub and c<best_c:
+                best,best_c = sol,c
+                if (best_c-ub)/ub*100 <= 3.0:
                     print("GAP ≤ 3% logrado en fase 2")
                     break
 
-    # Fase 3
-    if (best_c - ub)/ub*100 > 3.0:
-        phase3_start = time.time()
+    # — Fase 3
+    if (best_c-ub)/ub*100 > 3.0:
+        t3=time.time()
         print("Entrando en fase 3...")
-        while time.time() - phase3_start < PHASE3_TIME:
+        while time.time()-t3 < PHASE3_TIME:
             nbr = deepcopy(best)
             i = random.randrange(len(nbr))
             ti,li = nbr[i]
-            positions = [p for p in range(1, len(ti)-1) if (ti[p], ti[p+1]) in inst.dem]
-            if positions:
-                pos = random.choice(positions)
-                u,v = ti[pos], ti[pos+1]
+            poss = [p for p in range(1,len(ti)-1) if (ti[p],ti[p+1]) in inst.dem]
+            if poss:
+                pos = random.choice(poss)
+                u,v = ti[pos],ti[pos+1]
                 d   = inst.dem[(u,v)]
-                j = random.choice([x for x in range(len(nbr)) if x!=i])
+                j   = random.choice([x for x in range(len(nbr)) if x!=i])
                 tj,lj = nbr[j]
-                if lj + d <= inst.Q:
-                    nbr[i] = (ti[:pos] + ti[pos+2:], li-d)
-                    nbr[j] = (tj[:-1] + [u,v] + [tj[-1]], lj+d)
-                    nbr = intra_two_opt(nbr, inst)
-                    nbr = inter_relocate(nbr, inst)
-                    c_nbr = compute_cost(nbr, inst)
-                    if c_nbr >= ub and c_nbr < best_c:
-                        best, best_c = nbr, c_nbr
-                        if (best_c - ub)/ub*100 <= 3.0:
+                if lj+d<=inst.Q:
+                    nbr[i] = (ti[:pos]+ti[pos+2:], li-d)
+                    nbr[j] = (tj[:-1]+[u,v]+[tj[-1]], lj+d)
+                    nbr = intra_two_opt(nbr,inst)
+                    nbr = inter_relocate(nbr,inst)
+                    c_n = compute_cost(nbr,inst)
+                    if c_n>=ub and c_n<best_c:
+                        best,best_c = nbr,c_n
+                        if (best_c-ub)/ub*100 <= 3.0:
                             print("GAP ≤ 3% logrado en fase 3")
                             break
             iters += 1
 
-    # Fase 4
-    if (best_c - ub)/ub*100 > 3.0:
-        phase4_start = time.time()
+    # — Fase 4
+    if (best_c-ub)/ub*100 > 3.0:
+        t4=time.time()
         print("Entrando en fase 4...")
-        while time.time() - phase4_start < PHASE4_TIME:
+        while time.time()-t4 < PHASE4_TIME:
             cand = ejection_chain(deepcopy(best), inst, L=3)
             iters += 1
-            c_cand = compute_cost(cand, inst)
-            if c_cand >= ub and c_cand < best_c:
-                best, best_c = cand, c_cand
-                print(f"   * Mejora en Fase 4: GAP={(best_c-ub)/ub*100:.2f}%")
-                if (best_c - ub)/ub*100 <= 3.0:
+            cc = compute_cost(cand, inst)
+            if cc>=ub and cc<best_c:
+                best,best_c = cand,cc
+                print(f"   * Mejora en fase 4: GAP={(best_c-ub)/ub*100:.2f}%")
+                if (best_c-ub)/ub*100 <= 3.0:
                     print("GAP ≤ 3% logrado en fase 4")
                     break
 
-    elapsed = time.time() - start
-    gap     = (best_c - ub)/ub*100
+    # — Sanitización final: asegurar depósito en inicio/fin ——
+    sanitized=[]
+    for idx,(tour,load) in enumerate(best, start=1):
+        if tour[0]!=inst.depot:
+            tour=[inst.depot]+tour
+        if tour[-1]!=inst.depot:
+            tour=tour+[inst.depot]
+        if tour[0]!=inst.depot or tour[-1]!=inst.depot:
+            raise RuntimeError(f"Ruta {idx} MALFORMADA: {tour}")
+        sanitized.append((tour,load))
+    best = sanitized
+
+    # — Impresión final ————————————————————————————
+    elapsed = time.time()-start
+    gap     = (best_c-ub)/ub*100
     print(f"{inst.name}: coste={best_c}  BKS={ub}  GAP={gap:.2f}%  "
           f"Iters={iters}  Tiempo={elapsed:.2f}s")
 
-    with open(sys.argv[2], 'w', encoding='utf-8') as f:
+    with open(sys.argv[2],'w', encoding='utf-8') as f:
         f.write(f"Instancia: {inst.name}\n")
         for i,(tour,load) in enumerate(best,1):
             f.write(f"Ruta {i:2d} (carga={load:3d}): {'-'.join(map(str,tour))}\n")

@@ -8,4 +8,4 @@ Coste total: 276
 BKS: 275
 GAP: 0.36%
 Iters: 68
-Tiempo: 0.28s
+Tiempo: 0.27s
