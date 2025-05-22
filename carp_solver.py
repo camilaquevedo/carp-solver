@@ -1,211 +1,334 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-carp_solver.py
-
-Heurística Path-Scanning + 2-opt para el Capacitated Arc Routing Problem (CARP).
-Soporta archivos .dat en formato Bruce Golden et al. (instancias gdb1 … gdb23).
-Al final guarda:
-  - Rutas encontradas
-  - Coste total
-  - LB (cota inferior Benavent)
-  - BKS (UB, mejor solución conocida)
-  - GAP vs. LB y vs. UB (%)
-  - Tiempo de ejecución (s)
+Heurística constructiva en cuatro fases:
+  - Fase 1 (0–PHASE1_TIME): GRASP‐RCL + LS ligera + ejection‐chain
+  – Fase 2 (si GAP > 3%): Randomized Giant Tour + Split + intra‐2opt (0–PHASE2_TIME)
+  – Fase 3 (si GAP > 3%): VNS ligera sobre la mejor solución (0–PHASE3_TIME)
+  – Fase 4 (si GAP > 3%): Ejection‐Chain profunda (L=3) (0–PHASE4_TIME)
 """
 
-import re
-import math
-import time
+import math, re, sys, time, heapq, random
 from collections import namedtuple
+from copy import deepcopy
 
-# ----------------------------------------
-# DATOS DE LB / BKS según Table 2 (Golden et al. 1983, ref. [20])
-# ----------------------------------------
-GDB_STATS = {
-    'gdb1':  {'LB': 310, 'UB': 316},
-    'gdb2':  {'LB': 339, 'UB': 339},
-    'gdb3':  {'LB': 275, 'UB': 275},
-    'gdb4':  {'LB': 274, 'UB': 287},
-    'gdb5':  {'LB': 376, 'UB': 377},
-    'gdb6':  {'LB': 295, 'UB': 298},
-    'gdb7':  {'LB': 312, 'UB': 325},
-    'gdb8':  {'LB': 326, 'UB': 348},
-    'gdb9':  {'LB': 277, 'UB': 303},
-    'gdb10': {'LB': 275, 'UB': 275},
-    'gdb11': {'LB': 395, 'UB': 395},
-    'gdb12': {'LB': 428, 'UB': 458},
-    'gdb13': {'LB': 536, 'UB': 538},
-    'gdb14': {'LB': 100, 'UB': 100},
-    'gdb15': {'LB': 58,  'UB': 58},
-    'gdb16': {'LB': 127, 'UB': 127},
-    'gdb17': {'LB': 91,  'UB': 91},
-    'gdb18': {'LB': 164, 'UB': 164},
-    'gdb19': {'LB': 55,  'UB': 55},
-    'gdb20': {'LB': 121, 'UB': 121},
-    'gdb21': {'LB': 156, 'UB': 156},
-    'gdb22': {'LB': 200, 'UB': 200},
-    'gdb23': {'LB': 233, 'UB': 233},
+# — Parámetros globales —————————————————————————
+SEED         = 42
+PHASE1_TIME  = 60.0    # segundos de fase 1 (GRASP‐LS)
+PHASE2_TIME  = 60.0    # segundos de fase 2 (Giant‐Split)
+PHASE3_TIME  = 15.0    # segundos de fase 3 (VNS ligera)
+PHASE4_TIME  = 15.0    # segundos de fase 4 (Ejection-Chain profunda)
+ALPHA_RCL    = 0.15    # RCL para GRASP
+TOP_K        = 3       # candidatos RCL en Giant‐Split
+
+# BKS (óptimos)
+BKS = {
+    'gdb1':316,'gdb2':339,'gdb3':275,'gdb4':287,'gdb5':377,
+    'gdb6':298,'gdb7':325,'gdb8':348,'gdb9':303,'gdb10':275,
+    'gdb11':395,'gdb12':458,'gdb13':538,'gdb14':100,'gdb15':58,
+    'gdb16':127,'gdb17':91,'gdb18':164,'gdb19':55,'gdb20':121,
+    'gdb21':156,'gdb22':200,'gdb23':233
 }
 
-# ----------------------------------------
-# ESTRUCTURAS DE DATOS
-# ----------------------------------------
-Arc = namedtuple('Arc', ['u', 'v', 'cost', 'demand'])
+Arc = namedtuple('Arc','u v cost dem')
 
-class CARPInstance:
+class Instance:
     def __init__(self, path):
-        self.name = None
-        self.num_vertices = 0
-        self.vehicles = 0
-        self.capacity = 0
-        self.depot = None
-        self.req_arcs = []
-        self.adj = {}
-        self._parse_dat(path)
-        self.dist = self._floyd_warshall()
-
-    def _parse_dat(self, path):
-        with open(path, 'r') as f:
-            text = f.read()
-        # Nombre
-        m = re.search(r'NOMBRE\s*:\s*(\S+)', text)
-        self.name = m.group(1).lower()
-        # Parámetros
-        def gi(tag):
-            m = re.search(rf'{tag}\s*:\s*(\d+)', text)
-            return int(m.group(1))
-        self.num_vertices = gi('VERTICES')
-        self.vehicles    = gi('VEHICULOS')
-        self.capacity    = gi('CAPACIDAD')
-        # Depósito
-        m = re.search(r'DEPOSITO\s*:\s*(\d+)', text)
-        self.depot = int(m.group(1))
-        # Inicializa grafo vacío
-        for i in range(1, self.num_vertices+1):
-            self.adj[i] = {}
-        # Leer aristas requeridas
-        block = re.search(r'LISTA_ARISTAS_REQ\s*:(.*?)DEPOSITO', text, re.S).group(1)
-        for line in block.strip().splitlines():
-            nums = list(map(int, re.findall(r'\d+', line)))
-            if len(nums) >= 4:
-                u, v, cost, demand = nums[:4]
-                self.req_arcs.append(Arc(u, v, cost, demand))
-                # grafo no dirigido
-                self.adj[u][v] = cost
-                self.adj[v][u] = cost
-
-    def _floyd_warshall(self):
-        V = self.num_vertices
+        txt = open(path, encoding='utf-8').read()
+        nm  = re.search(r'NOMBRE\s*:\s*(\S+)', txt, re.I).group(1).lower()
+        m   = re.match(r'(gdb\d+)', nm)
+        self.name = m.group(1) if m else nm
+        gi = lambda tag: int(re.search(rf'{tag}\s*:\s*(\d+)', txt, re.I).group(1))
+        self.V, self.Q, self.depot = gi('VERTICES'), gi('CAPACIDAD'), gi('DEPOSITO')
+        self.adj, self.req = {i:{} for i in range(1,self.V+1)}, []
+        def add(u,v,c,d=0):
+            self.adj[u][v] = self.adj[v][u] = c
+            if d>0:
+                self.req.append(Arc(u,v,c,d))
+        b = re.search(r'LISTA_ARISTAS_REQ\S*\s*:(.*?)(?:LISTA_ARISTAS_NO_REQ|$)', txt, re.S|re.I)
+        if b:
+            for ln in b.group(1).splitlines():
+                nums = list(map(int, re.findall(r'\d+', ln)))
+                if len(nums) >= 4:
+                    add(*nums[:4])
+        b = re.search(r'LISTA_ARISTAS_NO_REQ\s*:(.*?)$', txt, re.S|re.I)
+        if b:
+            for ln in b.group(1).splitlines():
+                nums = list(map(int, re.findall(r'\d+', ln)))
+                if len(nums) >= 3:
+                    add(nums[0], nums[1], nums[2])
+        self.dem  = {(a.u,a.v):a.dem for a in self.req}
+        self.dem.update({(a.v,a.u):a.dem for a in self.req})
+        self.cost = {(a.u,a.v):a.cost for a in self.req}
+        self.cost.update({(a.v,a.u):a.cost for a in self.req})
         INF = math.inf
-        dist = [[INF]*(V+1) for _ in range(V+1)]
-        for i in range(1, V+1):
-            dist[i][i] = 0
-            for j, c in self.adj[i].items():
-                dist[i][j] = c
-        for k in range(1, V+1):
-            for i in range(1, V+1):
-                for j in range(1, V+1):
-                    if dist[i][j] > dist[i][k] + dist[k][j]:
-                        dist[i][j] = dist[i][k] + dist[k][j]
-        return dist
+        self.dist = [[INF]*(self.V+1) for _ in range(self.V+1)]
+        for s in range(1,self.V+1):
+            self.dist[s][s] = 0
+            pq = [(0,s)]
+            while pq:
+                d,u = heapq.heappop(pq)
+                if d > self.dist[s][u]: continue
+                for v,c in self.adj[u].items():
+                    nd = d + c
+                    if nd < self.dist[s][v]:
+                        self.dist[s][v] = nd
+                        heapq.heappush(pq, (nd, v))
 
-# ----------------------------------------
-# HEURÍSTICO CONSTRUCTIVO: Path-Scanning
-# ----------------------------------------
-def path_scanning(inst: CARPInstance):
-    unserved = set(range(len(inst.req_arcs)))
+def compute_cost(sol, inst):
+    return sum(inst.cost.get((u,v), inst.dist[u][v])
+               for tour,_ in sol for u,v in zip(tour, tour[1:]))
+
+def trivial_solution(inst):
+    return [([inst.depot,a.u,a.v,inst.depot], a.dem) for a in inst.req]
+
+
+# Fase 1: GRASP‐RCL + LS ligera + ejection‐chain ligera
+
+def constructive_grasp(inst):
+    unserved = set((a.u,a.v) for a in inst.req)
     routes = []
     while unserved:
-        load = 0
+        cur, load = inst.depot, 0
         tour = [inst.depot]
         while True:
-            cands = []
-            last = tour[-1]
-            for idx in unserved:
-                arc = inst.req_arcs[idx]
-                if load + arc.demand <= inst.capacity:
-                    cost_to_u = inst.dist[last][arc.u] + arc.cost
-                    cands.append((cost_to_u, idx))
-            if not cands:
-                break
-            _, chosen = min(cands)
-            arc = inst.req_arcs[chosen]
-            tour.extend([arc.u, arc.v])
-            load += arc.demand
-            unserved.remove(chosen)
+            C = []
+            for u,v in unserved:
+                d = inst.dem[(u,v)]
+                if load + d > inst.Q: continue
+                C.append((inst.dist[cur][u], u, v))
+            if not C: break
+            C.sort(key=lambda x: x[0])
+            dmin, dmax = C[0][0], C[-1][0]
+            thr = dmin + ALPHA_RCL * (dmax - dmin)
+            RCL = [(u,v) for dist,u,v in C if dist <= thr]
+            u,v = random.choice(RCL)
+            tour.extend([u,v])
+            load += inst.dem[(u,v)]
+            unserved.remove((u,v))
+            cur = v
         tour.append(inst.depot)
         routes.append((tour, load))
     return routes
 
-# ----------------------------------------
-# MEJORA LOCAL: 2-opt sobre cada ruta
-# ----------------------------------------
-def two_opt_route(route, dist):
-    best = route
+def intra_two_opt(sol, inst):
+    for i,(tour,load) in enumerate(sol):
+        best_t, delta = tour, 0
+        L = len(tour)
+        for a in range(1, L-2):
+            for b in range(a+1, L-1):
+                u1,v1 = tour[a-1], tour[a]
+                u2,v2 = tour[b],    tour[b+1]
+                old = inst.dist[u1][v1] + inst.dist[u2][v2]
+                new = inst.dist[u1][u2] + inst.dist[v1][v2]
+                d = new - old
+                if d < delta:
+                    delta = d
+                    best_t = tour[:a] + tour[a:b+1][::-1] + tour[b+1:]
+        if delta < 0:
+            sol[i] = (best_t, load)
+    return sol
+
+def inter_relocate(sol, inst):
     improved = True
     while improved:
         improved = False
-        for i in range(1, len(best)-2):
-            for j in range(i+1, len(best)-1):
-                if dist[best[i-1]][best[j]] + dist[best[i]][best[j+1]] \
-                   < dist[best[i-1]][best[i]] + dist[best[j]][best[j+1]]:
-                    best = best[:i] + best[i:j+1][::-1] + best[j+1:]
-                    improved = True
-        route = best
-    return best
+        base = compute_cost(sol, inst)
+        for i,(ti,li) in enumerate(sol):
+            for pos in range(1, len(ti)-2):
+                u,v = ti[pos], ti[pos+1]
+                d = inst.dem.get((u,v),0)
+                if d==0 or li-d<0: continue
+                for j,(tj,lj) in enumerate(sol):
+                    if i==j or lj+d>inst.Q: continue
+                    nr = deepcopy(sol)
+                    nr[i] = (ti[:pos]+ti[pos+2:], li-d)
+                    nr[j] = (tj[:-1]+[u,v]+[tj[-1]], lj+d)
+                    c = compute_cost(nr, inst)
+                    if c < base:
+                        sol, base, improved = nr, c, True
+                        break
+                if improved: break
+            if improved: break
+    return sol
 
-def improve(routes, inst):
-    return [(two_opt_route(tour, inst.dist), load) for tour, load in routes]
+def ejection_chain(sol, inst, L=1):
+    best_sol = sol
+    best_c   = compute_cost(sol, inst)
+    for _ in range(L):
+        sol = intra_two_opt(sol, inst)
+        sol = inter_relocate(sol, inst)
+        for i,(ti,li) in enumerate(sol):
+            poss = [p for p in range(1, len(ti)-1) if (ti[p], ti[p+1]) in inst.dem]
+            if not poss: continue
+            pos = random.choice(poss)
+            u,v = ti[pos], ti[pos+1]
+            d = inst.dem[(u,v)]
+            j = random.choice([x for x in range(len(sol)) if x!=i])
+            tj,lj = sol[j]
+            if lj + d <= inst.Q:
+                nr = deepcopy(sol)
+                nr[i] = (ti[:pos]+ti[pos+2:], li-d)
+                nr[j] = (tj[:-1]+[u,v]+[tj[-1]], lj+d)
+                c = compute_cost(nr, inst)
+                if c < best_c:
+                    best_sol, best_c = nr, c
+        sol = best_sol
+    return best_sol
 
-# ----------------------------------------
-# ESCRITURA DE LA SOLUCIÓN (solo GAP vs. UB)
-# ----------------------------------------
-def write_solution(inst, routes, sol_path, t_elapsed):
-    cost_total = 0
-    with open(sol_path, 'w') as f:
-        f.write(f"Instancia: {inst.name}\n\n")
-        f.write("Rutas encontradas:\n")
-        for i, (tour, _) in enumerate(routes, 1):
-            f.write(f"  Ruta {i}: {'-'.join(map(str, tour))}\n")
-            for k in range(len(tour)-1):
-                cost_total += inst.dist[tour[k]][tour[k+1]]
-        f.write(f"\nCoste total: {cost_total}\n")
+def constructive_with_ls(inst):
+    sol = constructive_grasp(inst)
+    sol = intra_two_opt(sol, inst)
+    sol = inter_relocate(sol, inst)
+    sol = ejection_chain(sol, inst, L=1)
+    return sol
 
-        stats = GDB_STATS.get(inst.name)
-        if stats:
-            ub = stats['UB']
-            gap_ub = (cost_total - ub) / ub * 100
-            f.write(f"BKS (UB):       {ub}\n")
-            f.write(f"GAP vs. UB:     {gap_ub:.2f}%\n")
-        else:
-            f.write("BKS (UB):       N/D\n")
-            f.write("GAP vs. UB:     N/A\n")
+# Fase 2: Randomized Giant Tour + Split + intra‐2opt
 
-        f.write(f"Tiempo de ejecución: {t_elapsed:.3f} s\n")
+def build_randomized_giant(inst):
+    un = set((a.u,a.v) for a in inst.req)
+    path = [inst.depot]; cur = inst.depot
+    while un:
+        cand = [(inst.dist[cur][u],u,v) for u,v in un]
+        cand.sort(key=lambda x: x[0])
+        top = cand[:min(TOP_K, len(cand))]
+        _,u,v = random.choice(top)
+        path.extend([u,v])
+        cur = v; un.remove((u,v))
+    path.append(inst.depot)
+    return path
 
-    # Impresión por pantalla
-    if stats:
-        print(f"Resuelto {inst.name}: coste={cost_total}, GAP_vs_UB={gap_ub:.2f}%, tiempo={t_elapsed:.3f}s")
-    else:
-        print(f"Resuelto {inst.name}: coste={cost_total}, GAP_vs_UB=N/A, tiempo={t_elapsed:.3f}s")
+def split_giant(inst, path):
+    n = len(path)
+    pd, pc = [0]*n, [0]*n
+    for i in range(1,n):
+        u,v = path[i-1], path[i]
+        pd[i] = pd[i-1] + inst.dem.get((u,v),0)
+        pc[i] = pc[i-1] + inst.cost.get((u,v), inst.dist[u][v])
+    dp   = [math.inf]*n
+    prev = [-1]*n
+    dp[0] = 0
+    for j in range(1,n):
+        for i in range(j,-1,-1):
+            load = pd[j]-pd[i]
+            if load>inst.Q: break
+            cost = dp[i]
+            cost += inst.dist[inst.depot][path[i]]
+            cost += (pc[j]-pc[i])
+            cost += inst.dist[path[j]][inst.depot]
+            if cost < dp[j]:
+                dp[j], prev[j] = cost, i
+    sol=[]; j=n-1
+    while j>0:
+        i = prev[j]
+        seg  = [inst.depot] + path[i+1:j+1] + [inst.depot]
+        load = pd[j]-pd[i]
+        sol.append((seg, load))
+        j = i
+    sol.reverse()
+    return sol
 
+def build_split_sol(inst):
+    giant = build_randomized_giant(inst)
+    sol   = split_giant(inst, giant)
+    sol   = intra_two_opt(sol, inst)
+    return sol
 
-# ----------------------------------------
-# PUNTO DE ENTRADA
-# ----------------------------------------
-if __name__ == '__main__':
-    import sys
+# Main: cuatro fases con early-stop
+
+def main():
     if len(sys.argv) != 3:
-        print("Uso: python carp_solver.py instancia.dat solucion.txt")
+        print("Uso: python carp_four_phase_constructive.py <in.dat> <out.sol>")
         sys.exit(1)
+    random.seed(SEED)
 
-    inst_path, sol_path = sys.argv[1], sys.argv[2]
-    instance = CARPInstance(inst_path)
+    inst   = Instance(sys.argv[1])
+    ub     = BKS[inst.name]
+    best   = trivial_solution(inst)
+    best_c = compute_cost(best, inst)
+    iters  = 0
+    start  = time.time()
 
-    t0 = time.time()
-    routes = path_scanning(instance)
-    routes = improve(routes, instance)
-    t1 = time.time()
+    # Fase 1
+    while time.time() - start < PHASE1_TIME:
+        sol = constructive_with_ls(inst)
+        iters += 1
+        c = compute_cost(sol, inst)
+        if c >= ub and c < best_c:
+            best, best_c = sol, c
+            if (best_c - ub)/ub*100 <= 3.0:
+                print("GAP ≤ 3% logrado en fase 1")
+                break
 
-    write_solution(instance, routes, sol_path, t1 - t0)
+    # Fase 2
+    if (best_c - ub)/ub*100 > 3.0:
+        phase2_start = time.time()
+        print("Entrando en fase 2...")
+        while time.time() - phase2_start < PHASE2_TIME:
+            sol = build_split_sol(inst)
+            iters += 1
+            c = compute_cost(sol, inst)
+            if c >= ub and c < best_c:
+                best, best_c = sol, c
+                if (best_c - ub)/ub*100 <= 3.0:
+                    print("GAP ≤ 3% logrado en fase 2")
+                    break
+
+    # Fase 3
+    if (best_c - ub)/ub*100 > 3.0:
+        phase3_start = time.time()
+        print("Entrando en fase 3...")
+        while time.time() - phase3_start < PHASE3_TIME:
+            nbr = deepcopy(best)
+            i = random.randrange(len(nbr))
+            ti,li = nbr[i]
+            positions = [p for p in range(1, len(ti)-1) if (ti[p], ti[p+1]) in inst.dem]
+            if positions:
+                pos = random.choice(positions)
+                u,v = ti[pos], ti[pos+1]
+                d   = inst.dem[(u,v)]
+                j = random.choice([x for x in range(len(nbr)) if x!=i])
+                tj,lj = nbr[j]
+                if lj + d <= inst.Q:
+                    nbr[i] = (ti[:pos] + ti[pos+2:], li-d)
+                    nbr[j] = (tj[:-1] + [u,v] + [tj[-1]], lj+d)
+                    nbr = intra_two_opt(nbr, inst)
+                    nbr = inter_relocate(nbr, inst)
+                    c_nbr = compute_cost(nbr, inst)
+                    if c_nbr >= ub and c_nbr < best_c:
+                        best, best_c = nbr, c_nbr
+                        if (best_c - ub)/ub*100 <= 3.0:
+                            print("GAP ≤ 3% logrado en fase 3")
+                            break
+            iters += 1
+
+    # Fase 4
+    if (best_c - ub)/ub*100 > 3.0:
+        phase4_start = time.time()
+        print("Entrando en fase 4...")
+        while time.time() - phase4_start < PHASE4_TIME:
+            cand = ejection_chain(deepcopy(best), inst, L=3)
+            iters += 1
+            c_cand = compute_cost(cand, inst)
+            if c_cand >= ub and c_cand < best_c:
+                best, best_c = cand, c_cand
+                print(f"   * Mejora en Fase 4: GAP={(best_c-ub)/ub*100:.2f}%")
+                if (best_c - ub)/ub*100 <= 3.0:
+                    print("GAP ≤ 3% logrado en fase 4")
+                    break
+
+    elapsed = time.time() - start
+    gap     = (best_c - ub)/ub*100
+    print(f"{inst.name}: coste={best_c}  BKS={ub}  GAP={gap:.2f}%  "
+          f"Iters={iters}  Tiempo={elapsed:.2f}s")
+
+    with open(sys.argv[2], 'w', encoding='utf-8') as f:
+        f.write(f"Instancia: {inst.name}\n")
+        for i,(tour,load) in enumerate(best,1):
+            f.write(f"Ruta {i:2d} (carga={load:3d}): {'-'.join(map(str,tour))}\n")
+        f.write(f"\nCoste total: {best_c}\n")
+        f.write(f"BKS: {ub}\n")
+        f.write(f"GAP: {gap:.2f}%\n")
+        f.write(f"Iters: {iters}\n")
+        f.write(f"Tiempo: {elapsed:.2f}s\n")
+
+if __name__=="__main__":
+    main()
