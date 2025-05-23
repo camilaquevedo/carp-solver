@@ -17,9 +17,11 @@ cd carp-solver
 ## 2. Estructura del proyecto
 ```
 carp-solver/
-├─ instancias/      23 archivos *.dat (Instancias de Golden)
-├─ soluciones/      aquí se guardan los *.sol con la solución de cada instancia
-├─ carp_solver.py   heurística constructiva en 4 fases
+├─ instancias/         23 archivos *.dat (Instancias de Golden)
+├─ soluciones/         aquí se guardan los *.sol con la solución de cada instancia
+├─ graficos/           aquí se guardan los *.png con la visualización de cada solución
+├─ carp_solver.py      heurística constructiva en 4 fases
+├─ graficar_rutas.py   script que grafica la visualización de las soluciones
 └─ README.md
 ```
 
@@ -94,3 +96,10 @@ PHASE2_TIME = 60.0   # seg. Giant-Split
 ALPHA_RCL   = 0.15   # tamaño de la RCL en GRASP
 GAP_TARGET  = 3.0    # umbral GAP (%) para parar
 ```
+
+## 7. Visualización
+
+```bash
+python graficar_rutas.py
+```
+Al finalizar, la carpeta **graficos/** contendrá 23 archivos `.png`, uno por solución de instancia.
